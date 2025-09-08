@@ -6,6 +6,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { JSDOM } from 'jsdom';
 import { Readability } from '@mozilla/readability';
 import pLimit from 'p-limit';
+import OpenAI from 'openai';
 
 // Configuration via environment variables
 const discordBotToken = process.env.DISCORD_BOT_TOKEN;
@@ -24,6 +25,11 @@ const minimaxVoiceSingle = process.env.MINIMAX_VOICE_ID || process.env.MINIMAX_V
 const minimaxAudioFormat = process.env.MINIMAX_AUDIO_FORMAT || 'mp3';
 const minimaxSpeed = Number(process.env.MINIMAX_SPEED || '1.0');
 const minimaxEndpoint = process.env.MINIMAX_T2A_URL || 'https://api.minimax.chat/v1/t2a_v2';
+
+// OpenAI config
+const openaiApiKey = process.env.OPENAI_API_KEY || '';
+const openaiModel = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+const openai = openaiApiKey ? new OpenAI({ apiKey: openaiApiKey }) : null;
 
 function logInfo(message, ...rest) {
   if (['info', 'debug'].includes(logLevel)) {
@@ -52,6 +58,7 @@ function assertRequiredEnv() {
   if (!minimaxApiKey) missing.push('MINIMAX_API_KEY');
   if (!minimaxGroupId) missing.push('MINIMAX_GROUP_ID');
   if (!minimaxVoiceSingle) missing.push('MINIMAX_VOICE_ID');
+  if (!openaiApiKey) missing.push('OPENAI_API_KEY');
   if (missing.length) {
     throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
   }
@@ -294,7 +301,7 @@ async function fetchArticleContent(url) {
   }
 }
 
-function buildMonologueScript(perChannelMaterials, { startUtc, endUtc }) {
+function buildMonologueScriptHeuristic(perChannelMaterials, { startUtc, endUtc }) {
   const startJstLabel = formatJst(startUtc);
   const endJstLabel = formatJst(endUtc);
   const bullets = [];
@@ -323,6 +330,40 @@ function buildMonologueScript(perChannelMaterials, { startUtc, endUtc }) {
   lines.push('以上、注目の話題をダイジェストでお届けしました。');
   lines.push('この放送が情報収集の助けになれば幸いです。それでは、良い一日をお過ごしください。');
   return lines.join('\n');
+}
+
+async function buildMonologueScriptAI(perChannelMaterials, { startUtc, endUtc }) {
+  // Fallback to heuristic if OpenAI not configured
+  if (!openai) return buildMonologueScriptHeuristic(perChannelMaterials, { startUtc, endUtc });
+
+  const startJstLabel = formatJst(startUtc);
+  const endJstLabel = formatJst(endUtc);
+  const topics = [];
+  for (const [, material] of perChannelMaterials) {
+    for (const art of material.articles) {
+      topics.push({ title: art.title || '無題の記事', url: art.url, summary: art.text ? art.text.slice(0, 800) : '' });
+    }
+  }
+
+  const system = 'あなたは日本語のナレーターです。ポッドキャスト用の落ち着いた独白台本を作成します。専門用語は平易に説明し、冗長さは避け、5〜9分程度の長さを目安にしてください。';
+  const user = `期間: ${startJstLabel} 〜 ${endJstLabel}\n\n話題一覧（title/url/summaryの順）:\n${topics.map(t => `- ${t.title}\n  ${t.url}\n  ${t.summary}`).join('\n')}\n\n要件:\n- 導入→各トピックの要点→締めの順に\n- 適宜「出典: URL」で参照提示\n- 台本のみを出力（ヘッダ不要）`;
+
+  try {
+    const resp = await openai.chat.completions.create({
+      model: openaiModel,
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: user },
+      ],
+      temperature: 0.7,
+      max_tokens: 1200,
+    });
+    const content = resp.choices?.[0]?.message?.content?.trim();
+    if (content) return content;
+  } catch (e) {
+    logWarn(`OpenAI generation failed, using heuristic: ${e?.message || e}`);
+  }
+  return buildMonologueScriptHeuristic(perChannelMaterials, { startUtc, endUtc });
 }
 
 // (Castmake removed)
@@ -387,7 +428,7 @@ async function main() {
     for (const entry of perChannelMaterials.entries()) {
       materialsToInclude.set(entry[0], entry[1]);
     }
-    const script = buildMonologueScript(materialsToInclude, { startUtc, endUtc });
+    const script = await buildMonologueScriptAI(materialsToInclude, { startUtc, endUtc });
     const ttsFiles = await synthesizeMonologueWithMiniMax(script, { channelId: 'ALL' });
     const finalFile = await concatAudioFiles(ttsFiles, { channelId: 'ALL' });
     await saveRunOutput({ mode: 'single', startUtc, endUtc, material: Object.fromEntries(materialsToInclude), minimax: { segments: ttsFiles, finalFile } });

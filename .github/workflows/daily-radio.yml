@@ -28,6 +28,9 @@ jobs:
       MINIMAX_T2A_MODEL: speech-2.5-hd-preview
       MINIMAX_VOICE_ID: ${{ vars.MINIMAX_VOICE_ID }}
       MINIMAX_AUDIO_FORMAT: mp3
+      # OpenAI
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
     steps:
       - uses: actions/checkout@v4
       - name: Setup Node.js
