@@ -1,0 +1,20 @@
+{
+  "name": "ai-radio-github",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Daily Discord-to-Castmake conversation radio generator",
+  "scripts": {
+    "generate:radio": "node scripts/generate-radio.js"
+  },
+  "dependencies": {
+    "@mozilla/readability": "^0.5.0",
+    "jsdom": "^24.0.0",
+    "p-limit": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
+
+
