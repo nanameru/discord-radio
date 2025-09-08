@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { JSDOM } from 'jsdom';
 import { Readability } from '@mozilla/readability';
@@ -429,10 +428,9 @@ async function main() {
       materialsToInclude.set(entry[0], entry[1]);
     }
     const script = await buildMonologueScriptAI(materialsToInclude, { startUtc, endUtc });
-    const ttsFiles = await synthesizeMonologueWithMiniMax(script, { channelId: 'ALL' });
-    const finalFile = await concatAudioFiles(ttsFiles, { channelId: 'ALL' });
-    await saveRunOutput({ mode: 'single', startUtc, endUtc, material: Object.fromEntries(materialsToInclude), minimax: { segments: ttsFiles, finalFile } });
-    logInfo('Monologue audio done');
+    const finalFile = await synthesizeLongformMonologue(script, { channelId: 'ALL' });
+    await saveRunOutput({ mode: 'single', startUtc, endUtc, material: Object.fromEntries(materialsToInclude), minimax: { finalFile } });
+    logInfo('Monologue audio done (single request)');
   }
 }
 
@@ -546,31 +544,18 @@ async function minimaxT2ARequest(text, voiceId, idx) {
   throw new Error('MiniMax API returned unexpected response format');
 }
 
-async function synthesizeMonologueWithMiniMax(script, { channelId }) {
-  const paragraphs = (script || '').split(/\n{2,}/).map(s => s.trim()).filter(Boolean);
-  const chunksLinear = paragraphs.length > 0 ? paragraphs : (script || '').split(/\n/).map(s => s.trim()).filter(Boolean);
-  if (chunksLinear.length === 0) {
+async function synthesizeLongformMonologue(script, { channelId }) {
+  if (!script || !script.trim()) {
     logWarn('No monologue text to synthesize');
-    return [];
+    return null;
   }
   const outDir = path.join(process.cwd(), 'out');
   await fs.mkdir(outDir, { recursive: true });
-
-  const files = [];
-  let index = 0;
-  for (const unit of chunksLinear) {
-    const chunks = splitTextIntoChunks(unit, 800);
-    for (const [ci, chunk] of chunks.entries()) {
-      const buf = await minimaxT2ARequest(chunk, minimaxVoiceSingle, index);
-      const fname = `tts-${channelId}-${String(index).padStart(4, '0')}${chunks.length > 1 ? `-${ci}` : ''}.${minimaxAudioFormat}`;
-      const fpath = path.join(outDir, fname);
-      await fs.writeFile(fpath, buf);
-      files.push(fpath);
-      index += 1;
-      await delay(80);
-    }
-  }
-  return files;
+  const buf = await minimaxT2ARequest(script, minimaxVoiceSingle, 0);
+  const ts = Date.now();
+  const outFile = path.join(outDir, `episode-${channelId}-${ts}.${minimaxAudioFormat}`);
+  await fs.writeFile(outFile, buf);
+  return outFile;
 }
 
 function splitTextIntoChunks(text, chunkSize) {
@@ -583,27 +568,6 @@ function splitTextIntoChunks(text, chunkSize) {
   return arr;
 }
 
-async function concatAudioFiles(files, { channelId }) {
-  if (!files || files.length === 0) return null;
-  // Require ffmpeg in PATH
-  const outDir = path.join(process.cwd(), 'out');
-  const ts = Date.now();
-  const listFile = path.join(outDir, `concat-${channelId}-${ts}.txt`);
-  const outFile = path.join(outDir, `episode-${channelId}-${ts}.mp3`);
-  const listContent = files.map(f => `file '${f.replace(/'/g, "'\\''")}'`).join('\n');
-  await fs.writeFile(listFile, listContent, 'utf8');
-
-  await new Promise((resolve, reject) => {
-    const proc = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'concat', '-safe', '0', '-i', listFile, '-c', 'copy', outFile], { stdio: 'inherit' });
-    proc.on('error', reject);
-    proc.on('exit', code => {
-      if (code === 0) resolve();
-      else reject(new Error(`ffmpeg exited with code ${code}`));
-    });
-  });
-
-  logInfo(`Concatenated audio -> ${outFile}`);
-  return outFile;
-}
+// ffmpeg concat removed (single request synthesis)
 
 
