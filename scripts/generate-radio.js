@@ -23,7 +23,7 @@ const minimaxModel = process.env.MINIMAX_T2A_MODEL || 'speech-2.5-hd-preview';
 const minimaxVoiceSingle = process.env.MINIMAX_VOICE_ID || process.env.MINIMAX_VOICE_ID_A || process.env.MINIMAX_VOICE_ID_B || '';
 const minimaxAudioFormat = process.env.MINIMAX_AUDIO_FORMAT || 'mp3';
 const minimaxSpeed = Number(process.env.MINIMAX_SPEED || '1.0');
-const minimaxEndpoint = process.env.MINIMAX_T2A_URL || 'https://api.minimax.chat/v1/t2a_v2';
+const minimaxEndpoint = process.env.MINIMAX_T2A_URL || 'https://api.minimax.io/v1/t2a_v2';
 
 // OpenAI config
 const openaiApiKey = process.env.OPENAI_API_KEY || '';
@@ -494,22 +494,32 @@ function parseDialogueScript(script) {
 }
 
 async function minimaxT2ARequest(text, voiceId, idx) {
-  // Note: The MiniMax T2A V2 API typically requires Authorization and X-Group-ID headers.
-  // The exact response may be binary audio or JSON with base64 data. Handle both.
-  const url = minimaxEndpoint;
+  // MiniMax T2A v2 (non-streaming). API per docs: https://api.minimax.io/v1/t2a_v2?GroupId=${group_id}
+  const url = `${minimaxEndpoint}?GroupId=${encodeURIComponent(minimaxGroupId)}`;
   const body = {
     model: minimaxModel,
-    voice_id: voiceId,
     text,
-    audio_format: minimaxAudioFormat,
-    speed: minimaxSpeed,
+    stream: false,
+    voice_setting: {
+      voice_id: voiceId,
+      speed: minimaxSpeed,
+      vol: 1,
+      pitch: 0,
+    },
+    audio_setting: {
+      sample_rate: 32000,
+      bitrate: 128000,
+      format: minimaxAudioFormat,
+      channel: 1,
+    },
+    output_format: 'hex',
+    language_boost: 'Japanese',
   };
 
   const res = await fetch(url, {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${minimaxApiKey}`,
-      'X-Group-ID': minimaxGroupId,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(body),
@@ -532,33 +542,35 @@ async function minimaxT2ARequest(text, voiceId, idx) {
     const buf = Buffer.from(await res.arrayBuffer());
     return buf;
   }
-  // Try JSON
+  // Try JSON (non-streaming)
   const data = await res.json().catch(() => null);
-  // Known possibilities: {audio:"base64"}, {data:{audio:"base64"}}, {data:[{audio_base64:...}]}, {audio_base64:"..."}, {audio_url:"https://..."}
-  const candidates = [];
-  if (data) {
-    if (typeof data.audio === 'string') candidates.push(data.audio);
-    if (typeof data.audio_base64 === 'string') candidates.push(data.audio_base64);
-    if (data.data) {
-      if (typeof data.data.audio === 'string') candidates.push(data.data.audio);
-      if (typeof data.data.audio_base64 === 'string') candidates.push(data.data.audio_base64);
-      if (Array.isArray(data.data) && data.data[0]) {
-        const d0 = data.data[0];
-        if (typeof d0.audio === 'string') candidates.push(d0.audio);
-        if (typeof d0.audio_base64 === 'string') candidates.push(d0.audio_base64);
-      }
-    }
-    // If URL provided, fetch it
-    if (typeof data.audio_url === 'string') {
-      const url = data.audio_url;
-      const ares = await fetch(url);
-      if (!ares.ok) throw new Error(`MiniMax audio_url fetch failed ${ares.status}`);
-      const buf = Buffer.from(await ares.arrayBuffer());
-      return buf;
-    }
+  // Success pattern per docs: { data: { audio: 'hex audio', status: 2, ... }, base_resp: { status_code: 0, ... } }
+  if (data && data.base_resp && data.base_resp.status_code !== 0) {
+    const code = data.base_resp.status_code;
+    const msg = data.base_resp.status_msg || '';
+    throw new Error(`MiniMax API error status_code=${code} ${msg}`);
   }
-  if (candidates.length > 0) {
-    return Buffer.from(candidates[0], 'base64');
+  // audio_hex
+  const hexAudio = data && data.data && typeof data.data.audio === 'string' ? data.data.audio : null;
+  if (hexAudio) {
+    // 'hex audio' => binary bytes
+    return Buffer.from(hexAudio, 'hex');
+  }
+  // Fallbacks: sometimes variants exist
+  const audioUrl = data && typeof data.audio_url === 'string' ? data.audio_url : null;
+  if (audioUrl) {
+    const ares = await fetch(audioUrl);
+    if (!ares.ok) throw new Error(`MiniMax audio_url fetch failed ${ares.status}`);
+    return Buffer.from(await ares.arrayBuffer());
+  }
+  const b64Candidates = [];
+  if (data) {
+    if (typeof data.audio_base64 === 'string') b64Candidates.push(data.audio_base64);
+    if (data.data && typeof data.data.audio_base64 === 'string') b64Candidates.push(data.data.audio_base64);
+    if (Array.isArray(data.data) && data.data[0] && typeof data.data[0].audio_base64 === 'string') b64Candidates.push(data.data[0].audio_base64);
+  }
+  if (b64Candidates.length > 0) {
+    return Buffer.from(b64Candidates[0], 'base64');
   }
   const msg = data && (data.message || data.msg || data.error || JSON.stringify(data).slice(0, 300));
   throw new Error(`MiniMax API returned unexpected response format${msg ? `: ${msg}` : ''}`);
