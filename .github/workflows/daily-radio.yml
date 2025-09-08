@@ -1,0 +1,57 @@
+name: daily-radio
+
+on:
+  schedule:
+    - cron: '0 19 * * *' # JST 04:00
+  workflow_dispatch:
+    inputs:
+      date:
+        description: 'Override JST date (YYYY-MM-DD)'
+        required: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    env:
+      TZ: Asia/Tokyo
+      DISCORD_CHANNEL_IDS: ${{ vars.DISCORD_CHANNEL_IDS }}
+      CASTMAKE_CHANNEL_ID: ${{ vars.CASTMAKE_CHANNEL_ID }}
+      DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+      CASTMAKE_API_KEY: ${{ secrets.CASTMAKE_API_KEY }}
+      AGGREGATION_MODE: ${{ vars.AGGREGATION_MODE }}
+      EPISODE_TYPE: conversation
+      LOG_LEVEL: info
+      MAX_URLS: '20'
+      MAX_TEXT_CHARS: '2000'
+      MAX_CONCURRENCY: '4'
+      # MiniMax
+      MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
+      MINIMAX_GROUP_ID: ${{ secrets.MINIMAX_GROUP_ID }}
+      MINIMAX_T2A_MODEL: speech-2.5-hd-preview
+      MINIMAX_VOICE_ID_A: ${{ vars.MINIMAX_VOICE_ID_A }}
+      MINIMAX_VOICE_ID_B: ${{ vars.MINIMAX_VOICE_ID_B }}
+      MINIMAX_AUDIO_FORMAT: mp3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Generate radio
+        run: |
+          if [ -n "${{ github.event.inputs.date }}" ]; then
+            npm run generate:radio -- --date ${{ github.event.inputs.date }}
+          else
+            npm run generate:radio
+          fi
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-radio-out
+          path: out/
+
+

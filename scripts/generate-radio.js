@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { JSDOM } from 'jsdom';
 import { Readability } from '@mozilla/readability';
@@ -16,6 +17,16 @@ const maxArticleCount = parseInt(process.env.MAX_URLS || '20', 10);
 const maxArticleChars = parseInt(process.env.MAX_TEXT_CHARS || '2000', 10);
 const maxConcurrency = parseInt(process.env.MAX_CONCURRENCY || '4', 10);
 const logLevel = process.env.LOG_LEVEL || 'info';
+
+// MiniMax T2A configuration
+const minimaxApiKey = process.env.MINIMAX_API_KEY;
+const minimaxGroupId = process.env.MINIMAX_GROUP_ID; // often required by MiniMax as X-Group-ID
+const minimaxModel = process.env.MINIMAX_T2A_MODEL || 'speech-2.5-hd-preview';
+const minimaxVoiceA = process.env.MINIMAX_VOICE_ID_A || '';
+const minimaxVoiceB = process.env.MINIMAX_VOICE_ID_B || '';
+const minimaxAudioFormat = process.env.MINIMAX_AUDIO_FORMAT || 'mp3';
+const minimaxSpeed = Number(process.env.MINIMAX_SPEED || '1.0');
+const minimaxEndpoint = process.env.MINIMAX_T2A_URL || 'https://api.minimax.chat/v1/t2a_v2';
 
 function logInfo(message, ...rest) {
   if (['info', 'debug'].includes(logLevel)) {
@@ -43,6 +54,10 @@ function assertRequiredEnv() {
   if (!castmakeApiKey) missing.push('CASTMAKE_API_KEY');
   if (!castmakeChannelId) missing.push('CASTMAKE_CHANNEL_ID');
   if (!discordChannelIdsEnv) missing.push('DISCORD_CHANNEL_IDS');
+  if (!minimaxApiKey) missing.push('MINIMAX_API_KEY');
+  if (!minimaxGroupId) missing.push('MINIMAX_GROUP_ID');
+  if (!minimaxVoiceA) missing.push('MINIMAX_VOICE_ID_A');
+  if (!minimaxVoiceB) missing.push('MINIMAX_VOICE_ID_B');
   if (missing.length) {
     throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
   }
@@ -405,8 +420,11 @@ async function main() {
       const text = buildConversationText({ startUtc, endUtc, perChannelMaterials: new Map([[channelId, material]]) });
       logInfo(`Calling Castmake conversation for channel ${channelId}...`);
       const resp = await callCastmakeConversation({ text });
-      await saveRunOutput({ mode: 'per_channel', channelId, startUtc, endUtc, material, castmakeResponse: resp });
-      logInfo(`Castmake done for channel ${channelId}: episodeId=${resp.episodeId}`);
+      const script = resp?.script || '';
+      const ttsFiles = await synthesizeConversationWithMiniMax(script, { channelId });
+      const finalFile = await concatAudioFiles(ttsFiles, { channelId });
+      await saveRunOutput({ mode: 'per_channel', channelId, startUtc, endUtc, material, castmakeResponse: resp, minimax: { segments: ttsFiles, finalFile } });
+      logInfo(`Castmake script OK, MiniMax audio done for channel ${channelId}: episodeId=${resp.episodeId}`);
     }
     return;
   } else {
@@ -417,8 +435,11 @@ async function main() {
     const text = buildConversationText({ startUtc, endUtc, perChannelMaterials: materialsToInclude });
     logInfo('Calling Castmake conversation (single aggregated)...');
     const resp = await callCastmakeConversation({ text });
-    await saveRunOutput({ mode: 'single', startUtc, endUtc, material: Object.fromEntries(materialsToInclude), castmakeResponse: resp });
-    logInfo(`Castmake done: episodeId=${resp.episodeId}`);
+    const script = resp?.script || '';
+    const ttsFiles = await synthesizeConversationWithMiniMax(script, { channelId: 'ALL' });
+    const finalFile = await concatAudioFiles(ttsFiles, { channelId: 'ALL' });
+    await saveRunOutput({ mode: 'single', startUtc, endUtc, material: Object.fromEntries(materialsToInclude), castmakeResponse: resp, minimax: { segments: ttsFiles, finalFile } });
+    logInfo(`Castmake script OK, MiniMax audio done: episodeId=${resp.episodeId}`);
   }
 }
 
@@ -441,5 +462,158 @@ main().catch(err => {
   logError(err?.stack || err?.message || String(err));
   process.exitCode = 1;
 });
+
+// ===== MiniMax integration and audio pipeline =====
+
+function parseDialogueScript(script) {
+  // Parse lines like:
+  // A: ...
+  // B：...
+  // 司会A: ... / 相棒B：...
+  // Fallback: alternate speakers by line if no prefix
+  const lines = (script || '')
+    .split(/\r?\n/)
+    .map(l => l.trim())
+    .filter(Boolean);
+
+  const segments = [];
+  let lastSpeaker = 'A';
+  for (const raw of lines) {
+    let speaker = null;
+    let text = raw;
+    const m = raw.match(/^((?:司会)?A|(?:相棒)?B)[:：]\s*(.*)$/i);
+    if (m) {
+      const label = m[1].toUpperCase();
+      speaker = label.includes('B') ? 'B' : 'A';
+      text = (m[2] || '').trim();
+    } else if (/^(A|B)\s+/.test(raw)) {
+      const m2 = raw.match(/^(A|B)\s+(.*)$/);
+      speaker = m2[1];
+      text = (m2[2] || '').trim();
+    }
+
+    if (!speaker) {
+      // No explicit label → alternate
+      speaker = lastSpeaker === 'A' ? 'B' : 'A';
+    }
+    lastSpeaker = speaker;
+    if (text) segments.push({ speaker, text });
+  }
+  return segments;
+}
+
+async function minimaxT2ARequest(text, voiceId, idx) {
+  // Note: The MiniMax T2A V2 API typically requires Authorization and X-Group-ID headers.
+  // The exact response may be binary audio or JSON with base64 data. Handle both.
+  const url = minimaxEndpoint;
+  const body = {
+    model: minimaxModel,
+    voice_id: voiceId,
+    text,
+    audio_format: minimaxAudioFormat,
+    speed: minimaxSpeed,
+  };
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${minimaxApiKey}`,
+      'X-Group-ID': minimaxGroupId,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (res.status === 429) {
+    const retryAfter = Number(res.headers.get('retry-after') || '1');
+    logWarn(`MiniMax rate limited. Retrying after ${retryAfter}s`);
+    await delay(retryAfter * 1000);
+    return minimaxT2ARequest(text, voiceId, idx);
+  }
+
+  if (!res.ok) {
+    const txt = await res.text();
+    throw new Error(`MiniMax API error ${res.status}: ${txt}`);
+  }
+
+  const ct = res.headers.get('content-type') || '';
+  if (ct.includes('audio')) {
+    const buf = Buffer.from(await res.arrayBuffer());
+    return buf;
+  }
+  // Try JSON
+  const data = await res.json().catch(() => null);
+  if (data && data.audio) {
+    // some APIs return base64 at data.audio
+    return Buffer.from(data.audio, 'base64');
+  }
+  if (data && data.data && data.data[0] && data.data[0].audio_base64) {
+    return Buffer.from(data.data[0].audio_base64, 'base64');
+  }
+  throw new Error('MiniMax API returned unexpected response format');
+}
+
+async function synthesizeConversationWithMiniMax(script, { channelId }) {
+  const segments = parseDialogueScript(script);
+  if (segments.length === 0) {
+    logWarn('No dialogue segments parsed from script; skipping MiniMax synthesis');
+    return [];
+  }
+  const outDir = path.join(process.cwd(), 'out');
+  await fs.mkdir(outDir, { recursive: true });
+
+  const files = [];
+  let index = 0;
+  for (const seg of segments) {
+    const voice = seg.speaker === 'A' ? minimaxVoiceA : minimaxVoiceB;
+    const text = seg.text;
+    // Split overly long text into chunks
+    const chunks = splitTextIntoChunks(text, 800);
+    for (const [ci, chunk] of chunks.entries()) {
+      const buf = await minimaxT2ARequest(chunk, voice, index);
+      const fname = `tts-${channelId}-${String(index).padStart(4, '0')}${chunks.length > 1 ? `-${ci}` : ''}.${minimaxAudioFormat}`;
+      const fpath = path.join(outDir, fname);
+      await fs.writeFile(fpath, buf);
+      files.push(fpath);
+      index += 1;
+      // small pacing to be gentle on API
+      await delay(100);
+    }
+  }
+  return files;
+}
+
+function splitTextIntoChunks(text, chunkSize) {
+  const arr = [];
+  let i = 0;
+  while (i < text.length) {
+    arr.push(text.slice(i, i + chunkSize));
+    i += chunkSize;
+  }
+  return arr;
+}
+
+async function concatAudioFiles(files, { channelId }) {
+  if (!files || files.length === 0) return null;
+  // Require ffmpeg in PATH
+  const outDir = path.join(process.cwd(), 'out');
+  const ts = Date.now();
+  const listFile = path.join(outDir, `concat-${channelId}-${ts}.txt`);
+  const outFile = path.join(outDir, `episode-${channelId}-${ts}.mp3`);
+  const listContent = files.map(f => `file '${f.replace(/'/g, "'\\''")}'`).join('\n');
+  await fs.writeFile(listFile, listContent, 'utf8');
+
+  await new Promise((resolve, reject) => {
+    const proc = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'concat', '-safe', '0', '-i', listFile, '-c', 'copy', outFile], { stdio: 'inherit' });
+    proc.on('error', reject);
+    proc.on('exit', code => {
+      if (code === 0) resolve();
+      else reject(new Error(`ffmpeg exited with code ${code}`));
+    });
+  });
+
+  logInfo(`Concatenated audio -> ${outFile}`);
+  return outFile;
+}
 
 
