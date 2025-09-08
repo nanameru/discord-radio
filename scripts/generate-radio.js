@@ -10,8 +10,6 @@ import pLimit from 'p-limit';
 // Configuration via environment variables
 const discordBotToken = process.env.DISCORD_BOT_TOKEN;
 const discordChannelIdsEnv = process.env.DISCORD_CHANNEL_IDS || '';
-const castmakeApiKey = process.env.CASTMAKE_API_KEY;
-const castmakeChannelId = process.env.CASTMAKE_CHANNEL_ID;
 const aggregationMode = process.env.AGGREGATION_MODE || 'single'; // 'single' | 'per_channel' (single default)
 const maxArticleCount = parseInt(process.env.MAX_URLS || '20', 10);
 const maxArticleChars = parseInt(process.env.MAX_TEXT_CHARS || '2000', 10);
@@ -22,8 +20,7 @@ const logLevel = process.env.LOG_LEVEL || 'info';
 const minimaxApiKey = process.env.MINIMAX_API_KEY;
 const minimaxGroupId = process.env.MINIMAX_GROUP_ID; // often required by MiniMax as X-Group-ID
 const minimaxModel = process.env.MINIMAX_T2A_MODEL || 'speech-2.5-hd-preview';
-const minimaxVoiceA = process.env.MINIMAX_VOICE_ID_A || '';
-const minimaxVoiceB = process.env.MINIMAX_VOICE_ID_B || '';
+const minimaxVoiceSingle = process.env.MINIMAX_VOICE_ID || process.env.MINIMAX_VOICE_ID_A || process.env.MINIMAX_VOICE_ID_B || '';
 const minimaxAudioFormat = process.env.MINIMAX_AUDIO_FORMAT || 'mp3';
 const minimaxSpeed = Number(process.env.MINIMAX_SPEED || '1.0');
 const minimaxEndpoint = process.env.MINIMAX_T2A_URL || 'https://api.minimax.chat/v1/t2a_v2';
@@ -51,13 +48,10 @@ function logError(message, ...rest) {
 function assertRequiredEnv() {
   const missing = [];
   if (!discordBotToken) missing.push('DISCORD_BOT_TOKEN');
-  if (!castmakeApiKey) missing.push('CASTMAKE_API_KEY');
-  if (!castmakeChannelId) missing.push('CASTMAKE_CHANNEL_ID');
   if (!discordChannelIdsEnv) missing.push('DISCORD_CHANNEL_IDS');
   if (!minimaxApiKey) missing.push('MINIMAX_API_KEY');
   if (!minimaxGroupId) missing.push('MINIMAX_GROUP_ID');
-  if (!minimaxVoiceA) missing.push('MINIMAX_VOICE_ID_A');
-  if (!minimaxVoiceB) missing.push('MINIMAX_VOICE_ID_B');
+  if (!minimaxVoiceSingle) missing.push('MINIMAX_VOICE_ID');
   if (missing.length) {
     throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
   }
@@ -300,103 +294,38 @@ async function fetchArticleContent(url) {
   }
 }
 
-function buildConversationText({
-  startUtc,
-  endUtc,
-  perChannelMaterials,
-}) {
+function buildMonologueScript(perChannelMaterials, { startUtc, endUtc }) {
   const startJstLabel = formatJst(startUtc);
   const endJstLabel = formatJst(endUtc);
-
-  const lines = [];
-  lines.push(`期間: ${startJstLabel} 〜 ${endJstLabel}`);
-  lines.push('概要: 以下のDiscordチャンネルで共有された話題と記事をもとに、2人の会話（日本語）でラジオ台本を作成してください。');
-  lines.push('要件: 7〜12分程度、適度な雑談、初心者にも分かりやすく要点を解説。重要な箇所では出典URLに言及してください。');
-  lines.push('登場人物: 司会Aと相棒B（どちらも落ち着いたトーン）。');
-  lines.push('トピック:');
-
-  let topicIndex = 1;
-  for (const [channelId, material] of perChannelMaterials) {
-    const { uniqueUrls, articles, miscMessages } = material;
-    if (perChannelMaterials.size > 1) {
-      lines.push(`- チャンネル ${channelId}:`);
-    }
-    for (const art of articles) {
+  const bullets = [];
+  for (const [, material] of perChannelMaterials) {
+    for (const art of material.articles) {
       const title = art.title || '無題の記事';
-      const excerpt = art.text ? art.text.slice(0, 400) : '';
-      lines.push(`${topicIndex}. ${title}`);
-      if (excerpt) lines.push(`   概要: ${excerpt}`);
-      lines.push(`   URL: ${art.url}`);
-      topicIndex += 1;
-    }
-    if (miscMessages.length) {
-      const sample = miscMessages.slice(0, 3).map(m => `「${m.slice(0, 120)}」`).join(' / ');
-      lines.push(`   その他の話題: ${sample}`);
+      const summary = art.text ? art.text.slice(0, 240).replace(/\s+/g, ' ') : '';
+      bullets.push({ title, url: art.url, summary });
     }
   }
 
-  lines.push('出力形式: 会話台本のみを出力してください。セクション見出しは不要です。');
+  const lines = [];
+  lines.push(`こんにちは。本放送では、${startJstLabel} から ${endJstLabel} の間に共有された話題をまとめてご紹介します。`);
+  if (bullets.length === 0) {
+    lines.push('本日は特筆すべき新着トピックはありませんでした。最近の動向の振り返りや、今後の見どころを簡単にお話しします。');
+  } else {
+    lines.push('まずは注目のトピックから。');
+  }
+  let idx = 1;
+  for (const b of bullets) {
+    lines.push(`${idx}. ${b.title}`);
+    if (b.summary) lines.push(`概要: ${b.summary}`);
+    lines.push(`出典: ${b.url}`);
+    idx += 1;
+  }
+  lines.push('以上、注目の話題をダイジェストでお届けしました。');
+  lines.push('この放送が情報収集の助けになれば幸いです。それでは、良い一日をお過ごしください。');
   return lines.join('\n');
 }
 
-function buildHeuristicTwoPersonScript(perChannelMaterials, { startUtc, endUtc }) {
-  const startJstLabel = formatJst(startUtc);
-  const endJstLabel = formatJst(endUtc);
-
-  const lines = [];
-  lines.push(`A: おはようございます。${startJstLabel} から ${endJstLabel} にかけて話題になったトピックを振り返っていきます。`);
-  lines.push('B: おはようございます。今日も盛りだくさんですね。まずは注目の話題から見ていきましょう。');
-  for (const [channelId, material] of perChannelMaterials) {
-    const { articles, miscMessages } = material;
-    for (const art of articles) {
-      const title = art.title || '無題の記事';
-      const summary = art.text ? art.text.slice(0, 180).replace(/\s+/g, ' ') : '概要は本文をご参照ください。';
-      lines.push(`A: 次の話題です。「${title}」。`);
-      lines.push(`B: ${summary}`);
-      lines.push(`A: 詳細は出典をご覧ください。URL: ${art.url}`);
-    }
-    if (miscMessages.length) {
-      const pick = miscMessages.slice(0, 2).map(m => m.slice(0, 100).replace(/\s+/g, ' '));
-      for (const p of pick) {
-        lines.push(`A: Discordでこんな意見もありました。${p}`);
-        lines.push('B: なるほど、関連するポイントも整理しておきたいですね。');
-      }
-    }
-  }
-  lines.push('A: 以上、今日のトピックでした。');
-  lines.push('B: また次回もお楽しみに。ありがとうございました。');
-  return lines.join('\n');
-}
-
-async function callCastmakeConversation({ text }) {
-  const url = 'https://api.castmake-ai.com/v1/episodes_conversation';
-  const body = {
-    channelId: castmakeChannelId,
-    text,
-  };
-  while (true) {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'x-castmake-api-key': castmakeApiKey,
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify(body),
-    });
-    if (res.status === 429) {
-      const retryAfterHeader = res.headers.get('retry-after');
-      const retryAfter = Number(retryAfterHeader || '1');
-      logWarn(`Castmake rate limited. Retrying after ${retryAfter}s`);
-      await delay(retryAfter * 1000);
-      continue;
-    }
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Castmake API error ${res.status}: ${text}`);
-    }
-    return res.json();
-  }
-}
+// (Castmake removed)
 
 async function main() {
   assertRequiredEnv();
@@ -441,42 +370,28 @@ async function main() {
     });
   }
 
-  // Aggregation: default is single conversation across all channels
+  // Aggregation: default is single monologue across all channels
   const materialsToInclude = new Map();
   if (aggregationMode === 'per_channel') {
-    // Generate one conversation per channel
+    // Generate one monologue per channel
     for (const [channelId, material] of perChannelMaterials) {
-      const text = buildConversationText({ startUtc, endUtc, perChannelMaterials: new Map([[channelId, material]]) });
-      logInfo(`Calling Castmake conversation for channel ${channelId}...`);
-      const resp = await callCastmakeConversation({ text });
-      let script = resp?.script || '';
-      if (!script || script.trim().length === 0) {
-        logWarn('No script returned by Castmake conversation; building heuristic two-person script.');
-        script = buildHeuristicTwoPersonScript(new Map([[channelId, material]]), { startUtc, endUtc });
-      }
-      const ttsFiles = await synthesizeConversationWithMiniMax(script, { channelId });
+      const script = buildMonologueScript(new Map([[channelId, material]]), { startUtc, endUtc });
+      const ttsFiles = await synthesizeMonologueWithMiniMax(script, { channelId });
       const finalFile = await concatAudioFiles(ttsFiles, { channelId });
-      await saveRunOutput({ mode: 'per_channel', channelId, startUtc, endUtc, material, castmakeResponse: resp, minimax: { segments: ttsFiles, finalFile } });
-      logInfo(`Castmake script OK, MiniMax audio done for channel ${channelId}: episodeId=${resp.episodeId}`);
+      await saveRunOutput({ mode: 'per_channel', channelId, startUtc, endUtc, material, minimax: { segments: ttsFiles, finalFile } });
+      logInfo(`Monologue audio done for channel ${channelId}`);
     }
     return;
   } else {
-    // Single conversation with all materials
+    // Single monologue with all materials
     for (const entry of perChannelMaterials.entries()) {
       materialsToInclude.set(entry[0], entry[1]);
     }
-    const text = buildConversationText({ startUtc, endUtc, perChannelMaterials: materialsToInclude });
-    logInfo('Calling Castmake conversation (single aggregated)...');
-    const resp = await callCastmakeConversation({ text });
-    let script = resp?.script || '';
-    if (!script || script.trim().length === 0) {
-      logWarn('No script returned by Castmake conversation; building heuristic two-person script.');
-      script = buildHeuristicTwoPersonScript(materialsToInclude, { startUtc, endUtc });
-    }
-    const ttsFiles = await synthesizeConversationWithMiniMax(script, { channelId: 'ALL' });
+    const script = buildMonologueScript(materialsToInclude, { startUtc, endUtc });
+    const ttsFiles = await synthesizeMonologueWithMiniMax(script, { channelId: 'ALL' });
     const finalFile = await concatAudioFiles(ttsFiles, { channelId: 'ALL' });
-    await saveRunOutput({ mode: 'single', startUtc, endUtc, material: Object.fromEntries(materialsToInclude), castmakeResponse: resp, minimax: { segments: ttsFiles, finalFile } });
-    logInfo(`Castmake script OK, MiniMax audio done: episodeId=${resp.episodeId}`);
+    await saveRunOutput({ mode: 'single', startUtc, endUtc, material: Object.fromEntries(materialsToInclude), minimax: { segments: ttsFiles, finalFile } });
+    logInfo('Monologue audio done');
   }
 }
 
@@ -590,10 +505,11 @@ async function minimaxT2ARequest(text, voiceId, idx) {
   throw new Error('MiniMax API returned unexpected response format');
 }
 
-async function synthesizeConversationWithMiniMax(script, { channelId }) {
-  const segments = parseDialogueScript(script);
-  if (segments.length === 0) {
-    logWarn('No dialogue segments parsed from script; skipping MiniMax synthesis');
+async function synthesizeMonologueWithMiniMax(script, { channelId }) {
+  const paragraphs = (script || '').split(/\n{2,}/).map(s => s.trim()).filter(Boolean);
+  const chunksLinear = paragraphs.length > 0 ? paragraphs : (script || '').split(/\n/).map(s => s.trim()).filter(Boolean);
+  if (chunksLinear.length === 0) {
+    logWarn('No monologue text to synthesize');
     return [];
   }
   const outDir = path.join(process.cwd(), 'out');
@@ -601,20 +517,16 @@ async function synthesizeConversationWithMiniMax(script, { channelId }) {
 
   const files = [];
   let index = 0;
-  for (const seg of segments) {
-    const voice = seg.speaker === 'A' ? minimaxVoiceA : minimaxVoiceB;
-    const text = seg.text;
-    // Split overly long text into chunks
-    const chunks = splitTextIntoChunks(text, 800);
+  for (const unit of chunksLinear) {
+    const chunks = splitTextIntoChunks(unit, 800);
     for (const [ci, chunk] of chunks.entries()) {
-      const buf = await minimaxT2ARequest(chunk, voice, index);
+      const buf = await minimaxT2ARequest(chunk, minimaxVoiceSingle, index);
       const fname = `tts-${channelId}-${String(index).padStart(4, '0')}${chunks.length > 1 ? `-${ci}` : ''}.${minimaxAudioFormat}`;
       const fpath = path.join(outDir, fname);
       await fs.writeFile(fpath, buf);
       files.push(fpath);
       index += 1;
-      // small pacing to be gentle on API
-      await delay(100);
+      await delay(80);
     }
   }
   return files;

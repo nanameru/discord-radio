@@ -15,11 +15,9 @@ jobs:
     env:
       TZ: Asia/Tokyo
       DISCORD_CHANNEL_IDS: ${{ vars.DISCORD_CHANNEL_IDS }}
-      CASTMAKE_CHANNEL_ID: ${{ vars.CASTMAKE_CHANNEL_ID }}
       DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
-      CASTMAKE_API_KEY: ${{ secrets.CASTMAKE_API_KEY }}
       AGGREGATION_MODE: ${{ vars.AGGREGATION_MODE }}
-      EPISODE_TYPE: conversation
+      EPISODE_TYPE: monologue
       LOG_LEVEL: info
       MAX_URLS: '20'
       MAX_TEXT_CHARS: '2000'
@@ -28,8 +26,7 @@ jobs:
       MINIMAX_API_KEY: ${{ secrets.MINIMAX_API_KEY }}
       MINIMAX_GROUP_ID: ${{ secrets.MINIMAX_GROUP_ID }}
       MINIMAX_T2A_MODEL: speech-2.5-hd-preview
-      MINIMAX_VOICE_ID_A: ${{ vars.MINIMAX_VOICE_ID_A }}
-      MINIMAX_VOICE_ID_B: ${{ vars.MINIMAX_VOICE_ID_B }}
+      MINIMAX_VOICE_ID: ${{ vars.MINIMAX_VOICE_ID }}
       MINIMAX_AUDIO_FORMAT: mp3
     steps:
       - uses: actions/checkout@v4
