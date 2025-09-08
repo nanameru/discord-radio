@@ -339,6 +339,35 @@ function buildConversationText({
   return lines.join('\n');
 }
 
+function buildHeuristicTwoPersonScript(perChannelMaterials, { startUtc, endUtc }) {
+  const startJstLabel = formatJst(startUtc);
+  const endJstLabel = formatJst(endUtc);
+
+  const lines = [];
+  lines.push(`A: おはようございます。${startJstLabel} から ${endJstLabel} にかけて話題になったトピックを振り返っていきます。`);
+  lines.push('B: おはようございます。今日も盛りだくさんですね。まずは注目の話題から見ていきましょう。');
+  for (const [channelId, material] of perChannelMaterials) {
+    const { articles, miscMessages } = material;
+    for (const art of articles) {
+      const title = art.title || '無題の記事';
+      const summary = art.text ? art.text.slice(0, 180).replace(/\s+/g, ' ') : '概要は本文をご参照ください。';
+      lines.push(`A: 次の話題です。「${title}」。`);
+      lines.push(`B: ${summary}`);
+      lines.push(`A: 詳細は出典をご覧ください。URL: ${art.url}`);
+    }
+    if (miscMessages.length) {
+      const pick = miscMessages.slice(0, 2).map(m => m.slice(0, 100).replace(/\s+/g, ' '));
+      for (const p of pick) {
+        lines.push(`A: Discordでこんな意見もありました。${p}`);
+        lines.push('B: なるほど、関連するポイントも整理しておきたいですね。');
+      }
+    }
+  }
+  lines.push('A: 以上、今日のトピックでした。');
+  lines.push('B: また次回もお楽しみに。ありがとうございました。');
+  return lines.join('\n');
+}
+
 async function callCastmakeConversation({ text }) {
   const url = 'https://api.castmake-ai.com/v1/episodes_conversation';
   const body = {
@@ -420,7 +449,11 @@ async function main() {
       const text = buildConversationText({ startUtc, endUtc, perChannelMaterials: new Map([[channelId, material]]) });
       logInfo(`Calling Castmake conversation for channel ${channelId}...`);
       const resp = await callCastmakeConversation({ text });
-      const script = resp?.script || '';
+      let script = resp?.script || '';
+      if (!script || script.trim().length === 0) {
+        logWarn('No script returned by Castmake conversation; building heuristic two-person script.');
+        script = buildHeuristicTwoPersonScript(new Map([[channelId, material]]), { startUtc, endUtc });
+      }
       const ttsFiles = await synthesizeConversationWithMiniMax(script, { channelId });
       const finalFile = await concatAudioFiles(ttsFiles, { channelId });
       await saveRunOutput({ mode: 'per_channel', channelId, startUtc, endUtc, material, castmakeResponse: resp, minimax: { segments: ttsFiles, finalFile } });
@@ -435,7 +468,11 @@ async function main() {
     const text = buildConversationText({ startUtc, endUtc, perChannelMaterials: materialsToInclude });
     logInfo('Calling Castmake conversation (single aggregated)...');
     const resp = await callCastmakeConversation({ text });
-    const script = resp?.script || '';
+    let script = resp?.script || '';
+    if (!script || script.trim().length === 0) {
+      logWarn('No script returned by Castmake conversation; building heuristic two-person script.');
+      script = buildHeuristicTwoPersonScript(materialsToInclude, { startUtc, endUtc });
+    }
     const ttsFiles = await synthesizeConversationWithMiniMax(script, { channelId: 'ALL' });
     const finalFile = await concatAudioFiles(ttsFiles, { channelId: 'ALL' });
     await saveRunOutput({ mode: 'single', startUtc, endUtc, material: Object.fromEntries(materialsToInclude), castmakeResponse: resp, minimax: { segments: ttsFiles, finalFile } });
