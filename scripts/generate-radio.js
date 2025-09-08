@@ -534,14 +534,34 @@ async function minimaxT2ARequest(text, voiceId, idx) {
   }
   // Try JSON
   const data = await res.json().catch(() => null);
-  if (data && data.audio) {
-    // some APIs return base64 at data.audio
-    return Buffer.from(data.audio, 'base64');
+  // Known possibilities: {audio:"base64"}, {data:{audio:"base64"}}, {data:[{audio_base64:...}]}, {audio_base64:"..."}, {audio_url:"https://..."}
+  const candidates = [];
+  if (data) {
+    if (typeof data.audio === 'string') candidates.push(data.audio);
+    if (typeof data.audio_base64 === 'string') candidates.push(data.audio_base64);
+    if (data.data) {
+      if (typeof data.data.audio === 'string') candidates.push(data.data.audio);
+      if (typeof data.data.audio_base64 === 'string') candidates.push(data.data.audio_base64);
+      if (Array.isArray(data.data) && data.data[0]) {
+        const d0 = data.data[0];
+        if (typeof d0.audio === 'string') candidates.push(d0.audio);
+        if (typeof d0.audio_base64 === 'string') candidates.push(d0.audio_base64);
+      }
+    }
+    // If URL provided, fetch it
+    if (typeof data.audio_url === 'string') {
+      const url = data.audio_url;
+      const ares = await fetch(url);
+      if (!ares.ok) throw new Error(`MiniMax audio_url fetch failed ${ares.status}`);
+      const buf = Buffer.from(await ares.arrayBuffer());
+      return buf;
+    }
   }
-  if (data && data.data && data.data[0] && data.data[0].audio_base64) {
-    return Buffer.from(data.data[0].audio_base64, 'base64');
+  if (candidates.length > 0) {
+    return Buffer.from(candidates[0], 'base64');
   }
-  throw new Error('MiniMax API returned unexpected response format');
+  const msg = data && (data.message || data.msg || data.error || JSON.stringify(data).slice(0, 300));
+  throw new Error(`MiniMax API returned unexpected response format${msg ? `: ${msg}` : ''}`);
 }
 
 async function synthesizeLongformMonologue(script, { channelId }) {
