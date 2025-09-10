@@ -433,6 +433,20 @@ async function main() {
       .map(m => m.content)
       .filter(Boolean);
 
+    // Logging: URL/テキストの内訳を残す
+    const urlMsgCount = extracted.filter(m => (m.urls && m.urls.length > 0)).length;
+    const textOnlyCount = extracted.filter(m => (!m.urls || m.urls.length === 0) && m.content).length;
+    logInfo(`Channel ${channelId}: ${urlMsgCount} messages contained URLs, ${textOnlyCount} text-only messages`);
+    if (logLevel === 'debug') {
+      const showUrls = allUrls.slice(0, 10);
+      if (showUrls.length) logDebug(`Channel ${channelId}: sample URLs ->`, showUrls);
+      const textSnippets = nonUrlMessages
+        .map(t => (t || '').replace(/\s+/g, ' ').trim().slice(0, 120))
+        .filter(Boolean)
+        .slice(0, 5);
+      if (textSnippets.length) logDebug(`Channel ${channelId}: sample text-only snippets ->`, textSnippets);
+    }
+
     const limit = pLimit(maxConcurrency);
     const articles = (await Promise.all(
       limitedUrls.map(u => limit(() => fetchArticleContent(u)))
