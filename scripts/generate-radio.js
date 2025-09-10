@@ -80,6 +80,8 @@ function parseCliArgs() {
   }
   return {
     date: argMap.get('date') || null,
+    noPost: argMap.has('no-post'),
+    postOnly: argMap.has('post-only'),
   };
 }
 
@@ -396,7 +398,7 @@ async function buildMonologueScriptAI(perChannelMaterials, { startUtc, endUtc })
 
 async function main() {
   assertRequiredEnv();
-  const { date } = parseCliArgs();
+  const { date, noPost, postOnly } = parseCliArgs();
   const endUtc = date ? buildJstEndUtcFromDateString(date) : getDefaultJstEndUtcNow();
   const startUtc = new Date(endUtc.getTime() - 24 * 60 * 60 * 1000);
 
@@ -409,6 +411,12 @@ async function main() {
 
   if (discordChannelIds.length === 0) {
     throw new Error('No DISCORD_CHANNEL_IDS provided');
+  }
+
+  // If post-only: skip fetching/generation, just try to post latest audio
+  if (postOnly) {
+    await postLatestAudioFromOut(startUtc, endUtc);
+    return;
   }
 
   const perChannelMaterials = new Map();
@@ -460,7 +468,7 @@ async function main() {
     logInfo('Monologue audio done (single request)');
 
     // Post to Discord (first channel by default)
-    if (finalFile) {
+    if (!noPost && finalFile) {
       const targetChannelId = discordChannelIds[0];
       try {
         const label = `${formatJst(startUtc)} -> ${formatJst(endUtc)}`;
@@ -732,6 +740,36 @@ async function postDiscordForumAudio(forumChannelId, filePath, title, content) {
       throw new Error(`Discord forum upload error ${res.status}: ${txt}`);
     }
     return await res.json();
+  }
+}
+
+// ===== Utility to post latest audio from out/ for post-only mode =====
+async function postLatestAudioFromOut(startUtc, endUtc) {
+  const outDir = path.join(process.cwd(), 'out');
+  try {
+    const files = await fs.readdir(outDir);
+    const audio = files
+      .filter(f => /\.(mp3|wav|ogg|m4a)$/.test(f))
+      .map(f => ({ f, t: Number((f.match(/-(\d+)\./)?.[1] || '0')) }))
+      .sort((a, b) => b.t - a.t)[0];
+    if (!audio) {
+      logWarn('No audio file found in out/ for post-only mode');
+      return;
+    }
+    const filePath = path.join(outDir, audio.f);
+    const label = `${formatJst(startUtc)} -> ${formatJst(endUtc)}`;
+    const targetChannelId = (process.env.DISCORD_CHANNEL_IDS || '').split(',').map(s => s.trim()).filter(Boolean)[0];
+    if (!targetChannelId) throw new Error('No DISCORD_CHANNEL_IDS provided');
+    const ch = await discordGetChannel(targetChannelId).catch(() => null);
+    if (ch && ch.type === 15) {
+      await postDiscordForumAudio(targetChannelId, filePath, `本日の自動ラジオ（${label}）`, `本日の自動ラジオ（${label}）`);
+      logInfo(`Posted latest audio as Forum thread to channel ${targetChannelId}`);
+    } else {
+      await postDiscordAudio(targetChannelId, filePath, `本日の自動ラジオ（${label}）`);
+      logInfo(`Posted latest audio to text channel ${targetChannelId}`);
+    }
+  } catch (e) {
+    logWarn(`post-only failed: ${e?.message || e}`);
   }
 }
 
