@@ -661,8 +661,10 @@ async function postDiscordAudio(channelId, filePath, content) {
   // Discord requires multipart/form-data with files[0] and payload_json
   const filename = path.basename(filePath);
   const form = new FormData();
-  const stream = createReadStream(filePath);
-  form.append('files[0]', stream, filename);
+  // undici(FormData) requires Blob/File, not Node streams
+  const fileBuf = await fs.readFile(filePath);
+  const blob = new Blob([fileBuf]);
+  form.append('files[0]', blob, filename);
   const payload = {
     content: content || '',
     allowed_mentions: { parse: [] },
@@ -695,7 +697,6 @@ async function postDiscordAudio(channelId, filePath, content) {
 // Forum (GuildForum) posting helper (type 15). Creates a thread with first message containing the file
 async function postDiscordForumAudio(forumChannelId, filePath, title, content) {
   const filename = path.basename(filePath);
-  const stream = createReadStream(filePath);
   const form = new FormData();
   // attachments metadata must reference the file indices
   const payload = {
@@ -717,7 +718,9 @@ async function postDiscordForumAudio(forumChannelId, filePath, title, content) {
     .filter(Boolean);
   if (tagIds.length > 0) payload.applied_tags = tagIds;
 
-  form.append('files[0]', stream, filename);
+  const fileBuf = await fs.readFile(filePath);
+  const blob = new Blob([fileBuf]);
+  form.append('files[0]', blob, filename);
   form.append('payload_json', JSON.stringify(payload));
 
   const url = `https://discord.com/api/v10/channels/${forumChannelId}/threads`;
