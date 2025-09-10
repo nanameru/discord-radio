@@ -40,12 +40,19 @@ jobs:
       # ffmpeg no longer required (single TTS request)
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
-      - name: Generate radio
+      - name: Generate radio (no post)
         run: |
           if [ -n "${{ github.event.inputs.date }}" ]; then
-            npm run generate:radio -- --date ${{ github.event.inputs.date }}
+            npm run generate:radio -- --date ${{ github.event.inputs.date }} --no-post
           else
-            npm run generate:radio
+            npm run generate:radio -- --no-post
+          fi
+      - name: Post radio (post-only)
+        run: |
+          if [ -n "${{ github.event.inputs.date }}" ]; then
+            npm run generate:radio -- --date ${{ github.event.inputs.date }} --post-only
+          else
+            npm run generate:radio -- --post-only
           fi
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
