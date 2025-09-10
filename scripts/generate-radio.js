@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import fs from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { JSDOM } from 'jsdom';
@@ -431,6 +432,18 @@ async function main() {
     const finalFile = await synthesizeLongformMonologue(script, { channelId: 'ALL' });
     await saveRunOutput({ mode: 'single', startUtc, endUtc, material: Object.fromEntries(materialsToInclude), minimax: { finalFile } });
     logInfo('Monologue audio done (single request)');
+
+    // Post to Discord (first channel by default)
+    if (finalFile) {
+      const targetChannelId = discordChannelIds[0];
+      try {
+        const label = `${formatJst(startUtc)} -> ${formatJst(endUtc)}`;
+        await postDiscordAudio(targetChannelId, finalFile, `本日の自動ラジオ（${label}）`);
+        logInfo(`Posted audio to Discord channel ${targetChannelId}`);
+      } catch (e) {
+        logWarn(`Failed to post audio to Discord: ${e?.message || e}`);
+      }
+    }
   }
 }
 
@@ -602,4 +615,40 @@ function splitTextIntoChunks(text, chunkSize) {
 
 // ffmpeg concat removed (single request synthesis)
 
+
+// ===== Discord upload helpers =====
+async function postDiscordAudio(channelId, filePath, content) {
+  // Discord requires multipart/form-data with files[0] and payload_json
+  const filename = path.basename(filePath);
+  const form = new FormData();
+  const stream = createReadStream(filePath);
+  form.append('files[0]', stream, filename);
+  const payload = {
+    content: content || '',
+    allowed_mentions: { parse: [] },
+  };
+  form.append('payload_json', JSON.stringify(payload));
+
+  const url = `https://discord.com/api/v10/channels/${channelId}/messages`;
+  while (true) {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bot ${discordBotToken}`,
+      },
+      body: form,
+    });
+    if (res.status === 429) {
+      const retryAfter = Number(res.headers.get('retry-after') || '1');
+      logWarn(`Discord rate limited on upload. Retrying after ${retryAfter}s`);
+      await delay(retryAfter * 1000);
+      continue;
+    }
+    if (!res.ok) {
+      const txt = await res.text();
+      throw new Error(`Discord upload error ${res.status}: ${txt}`);
+    }
+    return await res.json();
+  }
+}
 
