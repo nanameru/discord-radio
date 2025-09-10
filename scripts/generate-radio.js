@@ -16,6 +16,8 @@ const maxArticleCount = parseInt(process.env.MAX_URLS || '20', 10);
 const maxArticleChars = parseInt(process.env.MAX_TEXT_CHARS || '2000', 10);
 const maxConcurrency = parseInt(process.env.MAX_CONCURRENCY || '4', 10);
 const logLevel = process.env.LOG_LEVEL || 'info';
+// Optional forum tags (comma separated Snowflakes) applied when posting to Forum
+const discordForumTagIdsEnv = process.env.DISCORD_FORUM_TAG_IDS || '';
 
 // MiniMax T2A configuration
 const minimaxApiKey = process.env.MINIMAX_API_KEY;
@@ -166,6 +168,30 @@ async function discordApiRequest(pathname, queryParams = {}) {
       url.searchParams.set(key, String(value));
     }
   }
+  while (true) {
+    const res = await fetch(url, {
+      headers: {
+        'Authorization': `Bot ${discordBotToken}`,
+        'Content-Type': 'application/json'
+      }
+    });
+    if (res.status === 429) {
+      const retryAfter = Number(res.headers.get('retry-after')) || 1;
+      logWarn(`Discord rate limited. Retrying after ${retryAfter}s`);
+      await delay(retryAfter * 1000);
+      continue;
+    }
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`Discord API error ${res.status}: ${body}`);
+    }
+    return res.json();
+  }
+}
+
+async function discordGetChannel(channelId) {
+  const baseUrl = 'https://discord.com/api/v10';
+  const url = new URL(baseUrl + `/channels/${channelId}`);
   while (true) {
     const res = await fetch(url, {
       headers: {
@@ -438,8 +464,14 @@ async function main() {
       const targetChannelId = discordChannelIds[0];
       try {
         const label = `${formatJst(startUtc)} -> ${formatJst(endUtc)}`;
-        await postDiscordAudio(targetChannelId, finalFile, `本日の自動ラジオ（${label}）`);
-        logInfo(`Posted audio to Discord channel ${targetChannelId}`);
+        const ch = await discordGetChannel(targetChannelId).catch(() => null);
+        if (ch && ch.type === 15) {
+          await postDiscordForumAudio(targetChannelId, finalFile, `本日の自動ラジオ（${label}）`, `本日の自動ラジオ（${label}）`);
+          logInfo(`Posted audio as Forum thread to channel ${targetChannelId}`);
+        } else {
+          await postDiscordAudio(targetChannelId, finalFile, `本日の自動ラジオ（${label}）`);
+          logInfo(`Posted audio to Discord text channel ${targetChannelId}`);
+        }
       } catch (e) {
         logWarn(`Failed to post audio to Discord: ${e?.message || e}`);
       }
@@ -647,6 +679,57 @@ async function postDiscordAudio(channelId, filePath, content) {
     if (!res.ok) {
       const txt = await res.text();
       throw new Error(`Discord upload error ${res.status}: ${txt}`);
+    }
+    return await res.json();
+  }
+}
+
+// Forum (GuildForum) posting helper (type 15). Creates a thread with first message containing the file
+async function postDiscordForumAudio(forumChannelId, filePath, title, content) {
+  const filename = path.basename(filePath);
+  const stream = createReadStream(filePath);
+  const form = new FormData();
+  // attachments metadata must reference the file indices
+  const payload = {
+    name: title || filename,
+    message: {
+      content: content || '',
+      allowed_mentions: { parse: [] },
+      attachments: [
+        {
+          id: 0,
+          filename
+        }
+      ]
+    },
+  };
+  const tagIds = discordForumTagIdsEnv
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+  if (tagIds.length > 0) payload.applied_tags = tagIds;
+
+  form.append('files[0]', stream, filename);
+  form.append('payload_json', JSON.stringify(payload));
+
+  const url = `https://discord.com/api/v10/channels/${forumChannelId}/threads`;
+  while (true) {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bot ${discordBotToken}`,
+      },
+      body: form,
+    });
+    if (res.status === 429) {
+      const retryAfter = Number(res.headers.get('retry-after') || '1');
+      logWarn(`Discord rate limited on forum upload. Retrying after ${retryAfter}s`);
+      await delay(retryAfter * 1000);
+      continue;
+    }
+    if (!res.ok) {
+      const txt = await res.text();
+      throw new Error(`Discord forum upload error ${res.status}: ${txt}`);
     }
     return await res.json();
   }
