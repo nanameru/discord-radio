@@ -16,6 +16,7 @@ const maxArticleCount = parseInt(process.env.MAX_URLS || '20', 10);
 const maxArticleChars = parseInt(process.env.MAX_TEXT_CHARS || '2000', 10);
 const maxConcurrency = parseInt(process.env.MAX_CONCURRENCY || '4', 10);
 const logLevel = process.env.LOG_LEVEL || 'info';
+const logDiscordDump = String(process.env.LOG_DISCORD_DUMP || '').toLowerCase() === 'true' || process.env.LOG_DISCORD_DUMP === '1';
 // Optional forum tags (comma separated Snowflakes) applied when posting to Forum
 const discordForumTagIdsEnv = process.env.DISCORD_FORUM_TAG_IDS || '';
 
@@ -690,6 +691,30 @@ async function main() {
         .filter(Boolean)
         .slice(0, 5);
       if (textSnippets.length) logDebug(`Channel ${channelId}: sample text-only snippets ->`, textSnippets);
+    }
+
+    // Full dump of discord content to logs when enabled
+    if (logDiscordDump) {
+      try {
+        const rawSlim = messages.map(m => ({
+          id: m.id,
+          timestamp: m.timestamp,
+          author: m.author ? { id: m.author.id, username: m.author.username, bot: !!m.author.bot } : null,
+          content: m.content || '',
+          attachments: Array.isArray(m.attachments) ? m.attachments.map(a => ({ id: a.id, filename: a.filename, url: a.url })) : [],
+          embeds: Array.isArray(m.embeds) ? m.embeds.map(e => ({ url: e.url || null, title: e.title || null, description: e.description || null })) : [],
+        }));
+        const dump = {
+          channelId,
+          window: { startJST: formatJst(startUtc), endJST: formatJst(endUtc) },
+          counts: { raw: messages.length, extracted: extracted.length, urls: allUrls.length, texts: textMessages.length },
+          extracted,
+          raw: rawSlim,
+        };
+        console.log(`[DISCORD_DUMP][${channelId}]\n` + JSON.stringify(dump, null, 2));
+      } catch (e) {
+        logWarn(`Failed to dump Discord logs for channel ${channelId}: ${e?.message || e}`);
+      }
     }
 
     // Always show a tiny sample in info logs so that GitHub Actions logs can verify inputs

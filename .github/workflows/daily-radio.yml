@@ -19,6 +19,7 @@ jobs:
       AGGREGATION_MODE: ${{ vars.AGGREGATION_MODE }}
       EPISODE_TYPE: monologue
       LOG_LEVEL: info
+      LOG_DISCORD_DUMP: 'true'
       MAX_URLS: '20'
       MAX_TEXT_CHARS: '2000'
       MAX_CONCURRENCY: '4'
@@ -59,5 +60,4 @@ jobs:
         with:
           name: daily-radio-out
           path: out/
-
 
