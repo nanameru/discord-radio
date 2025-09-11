@@ -481,27 +481,44 @@ function buildMonologueScriptHeuristic(perChannelMaterials, { startUtc, endUtc }
 
   const lines = [];
   lines.push(`こんにちは。本放送では、${startJstLabel} から ${endJstLabel} の間に共有された話題をまとめてご紹介します。`);
+  
   if (bullets.length === 0 && limitedTextSnippets.length === 0) {
-    lines.push('本日は特筆すべき新着トピックはありませんでした。最近の動向の振り返りや、今後の見どころを簡単にお話しします。');
+    // 充実したフォールバック台本
+    lines.push('本日は特筆すべき新着トピックはありませんでした。しかし、この機会に最近の技術動向や業界の話題を振り返ってみたいと思います。');
+    lines.push('');
+    lines.push('まず、AI技術の進歩についてです。生成AIの分野では、大規模言語モデルの性能向上が続いており、より自然で実用的な対話が可能になってきています。');
+    lines.push('また、マルチモーダルAIの発展により、テキスト、画像、音声を統合した処理が一般的になりつつあります。');
+    lines.push('');
+    lines.push('開発分野では、クラウドネイティブ技術の採用が加速しています。コンテナ化、マイクロサービス、サーバーレス等の技術により、');
+    lines.push('スケーラブルで保守性の高いシステム構築が主流となっています。');
+    lines.push('');
+    lines.push('セキュリティ面では、ゼロトラスト・アーキテクチャの導入が進んでおり、従来の境界防御から脱却した新しいセキュリティモデルが注目されています。');
+    lines.push('');
+    lines.push('Web開発においては、フロントエンド・フレームワークの進化が続いており、パフォーマンスとDXの両立を図る技術が数多く登場しています。');
+    lines.push('');
+    lines.push('最後に、持続可能な開発への関心も高まっており、グリーンソフトウェア開発やカーボンニュートラルなインフラ運用が重要なテーマとなっています。');
+    lines.push('');
+    lines.push('これらの動向は、今後の技術選択や学習計画を考える上で重要な指針となるでしょう。');
   } else {
     lines.push('まずはDiscordでの会話から、要点を拾っていきます。');
-  }
-  // 先に会話の抜粋
-  if (limitedTextSnippets.length > 0) {
-    for (const s of limitedTextSnippets) {
-      lines.push(`・${s}`);
+    // 先に会話の抜粋
+    if (limitedTextSnippets.length > 0) {
+      for (const s of limitedTextSnippets) {
+        lines.push(`・${s}`);
+      }
+    }
+    // 続いて参考トピック（記事要約）
+    if (bullets.length > 0) {
+      lines.push('参考トピックの要点も簡単に。');
+      let idx = 1;
+      for (const b of bullets) {
+        lines.push(`${idx}. ${b.title}`);
+        if (b.summary) lines.push(`概要: ${b.summary}`);
+        idx += 1;
+      }
     }
   }
-  // 続いて参考トピック（記事要約）
-  if (bullets.length > 0) {
-    lines.push('参考トピックの要点も簡単に。');
-    let idx = 1;
-    for (const b of bullets) {
-      lines.push(`${idx}. ${b.title}`);
-      if (b.summary) lines.push(`概要: ${b.summary}`);
-      idx += 1;
-    }
-  }
+  
   lines.push('以上、注目の話題をダイジェストでお届けしました。');
   lines.push('この放送が情報収集の助けになれば幸いです。それでは、良い一日をお過ごしください。');
   return lines.join('\n');
@@ -628,11 +645,16 @@ async function main() {
 
   const perChannelMaterials = new Map();
   const channelsToFetch = collectionChannelIds.length > 0 ? collectionChannelIds : [postingChannelId];
+  logInfo(`DEBUG: Time range UTC: ${startUtc.toISOString()} -> ${endUtc.toISOString()}`);
+  logInfo(`DEBUG: Time range JST: ${formatJst(startUtc)} -> ${formatJst(endUtc)}`);
+  logInfo(`DEBUG: Channels to fetch: ${channelsToFetch.join(', ')}`);
+  
   for (const channelId of channelsToFetch) {
     logInfo(`Fetching Discord messages for channel ${channelId}...`);
     let messages = [];
     try {
       const ch = await discordGetChannel(channelId).catch(() => null);
+      logInfo(`DEBUG: Channel ${channelId} info:`, ch ? `type=${ch.type}, name=${ch.name || 'N/A'}` : 'null');
       if (ch && ch.type === 15) {
         // Forum channel: aggregate messages from threads
         messages = await fetchForumChannelMessagesInRange(channelId, startUtc, endUtc);
@@ -646,6 +668,8 @@ async function main() {
     logInfo(`Fetched ${messages.length} messages in range for channel ${channelId}`);
 
     const extracted = filterAndExtractFromMessages(messages);
+    logInfo(`DEBUG: Channel ${channelId} - Raw messages: ${messages.length}, After filtering: ${extracted.length}`);
+    
     const allUrls = Array.from(new Set(extracted.flatMap(m => m.urls)));
     const limitedUrls = allUrls.slice(0, maxArticleCount);
     // すべてのテキスト（URL有無問わず）
@@ -657,6 +681,7 @@ async function main() {
     const urlMsgCount = extracted.filter(m => (m.urls && m.urls.length > 0)).length;
     const textOnlyCount = extracted.filter(m => (!m.urls || m.urls.length === 0) && m.content).length;
     logInfo(`Channel ${channelId}: ${urlMsgCount} messages contained URLs, ${textOnlyCount} text-only messages, ${textMessages.length} total text messages`);
+    logInfo(`DEBUG: Channel ${channelId} - URLs found: ${allUrls.length}, Text messages: ${textMessages.length}`);
     if (logLevel === 'debug') {
       const showUrls = allUrls.slice(0, 10);
       if (showUrls.length) logDebug(`Channel ${channelId}: sample URLs ->`, showUrls);
