@@ -396,6 +396,36 @@ async function buildMonologueScriptAI(perChannelMaterials, { startUtc, endUtc })
 
 // (Castmake removed)
 
+async function generatePostTitleAI(perChannelMaterials, { startUtc, endUtc }) {
+  // Prefer OpenAI; fallback to heuristic
+  const defaultTitle = `日次ダイジェスト ${formatJst(startUtc).slice(0, 10)}`;
+  try {
+    const topics = [];
+    for (const [, material] of perChannelMaterials) {
+      for (const art of material.articles) {
+        topics.push(art.title || '無題');
+      }
+    }
+    if (!openai || topics.length === 0) return topics[0] || defaultTitle;
+    const prompt = `以下のトピック群から日本語の短い番組タイトルを1つ作ってください。最大28文字。装飾や引用符は不要で、具体的で簡潔に。
+トピック: ${topics.slice(0, 8).join(' / ')}
+期間: ${formatJst(startUtc)} 〜 ${formatJst(endUtc)}`;
+    const resp = await openai.chat.completions.create({
+      model: openaiModel,
+      messages: [
+        { role: 'system', content: 'あなたは日本語の見出しコピーライターです。短く端的で、ニュース要約向けの自然なタイトルを返します。' },
+        { role: 'user', content: prompt },
+      ],
+      temperature: 0.6,
+      max_tokens: 64,
+    });
+    const title = resp.choices?.[0]?.message?.content?.trim();
+    return title || topics[0] || defaultTitle;
+  } catch {
+    return defaultTitle;
+  }
+}
+
 async function main() {
   assertRequiredEnv();
   const { date, noPost, postOnly } = parseCliArgs();
@@ -477,8 +507,9 @@ async function main() {
       materialsToInclude.set(entry[0], entry[1]);
     }
     const script = await buildMonologueScriptAI(materialsToInclude, { startUtc, endUtc });
+    const aiTitle = await generatePostTitleAI(materialsToInclude, { startUtc, endUtc });
     const finalFile = await synthesizeLongformMonologue(script, { channelId: 'ALL' });
-    await saveRunOutput({ mode: 'single', startUtc, endUtc, material: Object.fromEntries(materialsToInclude), minimax: { finalFile } });
+    await saveRunOutput({ mode: 'single', startUtc, endUtc, title: aiTitle, material: Object.fromEntries(materialsToInclude), minimax: { finalFile } });
     logInfo('Monologue audio done (single request)');
 
     // Post to Discord (first channel by default)
@@ -488,10 +519,10 @@ async function main() {
         const label = `${formatJst(startUtc)} -> ${formatJst(endUtc)}`;
         const ch = await discordGetChannel(targetChannelId).catch(() => null);
         if (ch && ch.type === 15) {
-          await postDiscordForumAudio(targetChannelId, finalFile, `本日の自動ラジオ（${label}）`, `本日の自動ラジオ（${label}）`);
+          await postDiscordForumAudio(targetChannelId, finalFile, aiTitle || `本日の自動ラジオ（${label}）`, `本日の自動ラジオ（${label}）`);
           logInfo(`Posted audio as Forum thread to channel ${targetChannelId}`);
         } else {
-          await postDiscordAudio(targetChannelId, finalFile, `本日の自動ラジオ（${label}）`);
+          await postDiscordAudio(targetChannelId, finalFile, `${aiTitle ? '【' + aiTitle + '】 ' : ''}本日の自動ラジオ（${label}）`);
           logInfo(`Posted audio to Discord text channel ${targetChannelId}`);
         }
       } catch (e) {
@@ -765,6 +796,18 @@ async function postLatestAudioFromOut(startUtc, endUtc) {
   const outDir = path.join(process.cwd(), 'out');
   try {
     const files = await fs.readdir(outDir);
+    // try to capture latest run json for title
+    const runJson = files
+      .filter(f => /^run-\d{8}-\d{4}\.json$/.test(f))
+      .map(f => ({ f, t: Number((f.match(/run-(\d{8})-(\d{4})\.json/))?.slice(1).join('') || '0') }))
+      .sort((a, b) => b.t - a.t)[0];
+    let savedTitle = null;
+    if (runJson) {
+      try {
+        const js = JSON.parse(await fs.readFile(path.join(outDir, runJson.f), 'utf8'));
+        savedTitle = js?.title || null;
+      } catch {}
+    }
     const audio = files
       .filter(f => /\.(mp3|wav|ogg|m4a)$/.test(f))
       .map(f => ({ f, t: Number((f.match(/-(\d+)\./)?.[1] || '0')) }))
@@ -779,10 +822,10 @@ async function postLatestAudioFromOut(startUtc, endUtc) {
     if (!targetChannelId) throw new Error('No DISCORD_CHANNEL_IDS provided');
     const ch = await discordGetChannel(targetChannelId).catch(() => null);
     if (ch && ch.type === 15) {
-      await postDiscordForumAudio(targetChannelId, filePath, `本日の自動ラジオ（${label}）`, `本日の自動ラジオ（${label}）`);
+      await postDiscordForumAudio(targetChannelId, filePath, savedTitle || `本日の自動ラジオ（${label}）`, `本日の自動ラジオ（${label}）`);
       logInfo(`Posted latest audio as Forum thread to channel ${targetChannelId}`);
     } else {
-      await postDiscordAudio(targetChannelId, filePath, `本日の自動ラジオ（${label}）`);
+      await postDiscordAudio(targetChannelId, filePath, `${savedTitle ? '【' + savedTitle + '】 ' : ''}本日の自動ラジオ（${label}）`);
       logInfo(`Posted latest audio to text channel ${targetChannelId}`);
     }
   } catch (e) {
