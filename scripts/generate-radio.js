@@ -604,8 +604,9 @@ async function main() {
 
   logInfo(`Time window (JST): ${formatJst(startUtc)} -> ${formatJst(endUtc)}`);
 
+  // Allow multiple delimiters: comma, semicolon, Japanese punctuation, whitespace
   const discordChannelIds = discordChannelIdsEnv
-    .split(',')
+    .split(/[ ,;\uFF0C\uFF1B、\s]+/)
     .map(s => s.trim())
     .filter(Boolean);
 
@@ -619,8 +620,15 @@ async function main() {
     return;
   }
 
+  const postingChannelId = discordChannelIds[0];
+  const collectionChannelIds = discordChannelIds.slice(1);
+  if (collectionChannelIds.length === 0) {
+    logWarn('Only one DISCORD_CHANNEL_IDS provided. Using the first as both posting and collection source.');
+  }
+
   const perChannelMaterials = new Map();
-  for (const channelId of discordChannelIds) {
+  const channelsToFetch = collectionChannelIds.length > 0 ? collectionChannelIds : [postingChannelId];
+  for (const channelId of channelsToFetch) {
     logInfo(`Fetching Discord messages for channel ${channelId}...`);
     let messages = [];
     try {
@@ -684,7 +692,7 @@ async function main() {
     }
     return;
   } else {
-    // Single monologue with all materials
+    // Single monologue with all materials (from collection channels)
     for (const entry of perChannelMaterials.entries()) {
       materialsToInclude.set(entry[0], entry[1]);
     }
@@ -696,7 +704,7 @@ async function main() {
 
     // Post to Discord (first channel by default)
     if (!noPost && finalFile) {
-      const targetChannelId = discordChannelIds[0];
+      const targetChannelId = postingChannelId;
       try {
         const label = `${formatJst(startUtc)} -> ${formatJst(endUtc)}`;
         const ch = await discordGetChannel(targetChannelId).catch(() => null);
