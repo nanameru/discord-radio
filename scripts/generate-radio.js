@@ -692,10 +692,35 @@ async function main() {
       if (textSnippets.length) logDebug(`Channel ${channelId}: sample text-only snippets ->`, textSnippets);
     }
 
+    // Always show a tiny sample in info logs so that GitHub Actions logs can verify inputs
+    try {
+      const infoTextSnippets = textMessages
+        .map(t => (t || '').replace(/\s+/g, ' ').trim().slice(0, 80))
+        .filter(Boolean)
+        .slice(0, 3);
+      if (infoTextSnippets.length) {
+        logInfo(`Sample texts (${infoTextSnippets.length}):`, infoTextSnippets);
+      }
+      const articleSamples = limitedUrls.slice(0, 3);
+      if (articleSamples.length) {
+        logInfo(`Sample URLs (${articleSamples.length}):`, articleSamples);
+      }
+    } catch {}
+
     const limit = pLimit(maxConcurrency);
     const articles = (await Promise.all(
       limitedUrls.map(u => limit(() => fetchArticleContent(u)))
     )).filter(a => a && (a.title || a.text));
+
+    // Show article sample summaries in info logs (trimmed)
+    if (articles.length) {
+      const artPreview = articles.slice(0, 3).map(a => ({
+        title: (a.title || '').replace(/\s+/g, ' ').trim().slice(0, 60),
+        text: (a.text || '').replace(/\s+/g, ' ').trim().slice(0, 100),
+        url: a.url
+      }));
+      logInfo(`Sample articles (${artPreview.length}/${articles.length}):`, artPreview);
+    }
 
     perChannelMaterials.set(channelId, {
       uniqueUrls: limitedUrls,
