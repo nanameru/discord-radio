@@ -249,6 +249,16 @@ async function discordGetChannel(channelId) {
   }
 }
 
+async function discordGetGuildActiveThreads(guildId) {
+  // https://discord.com/developers/docs/resources/guild#list-active-threads
+  return discordApiRequest(`/guilds/${guildId}/threads/active`);
+}
+
+async function discordGetForumArchivedPublicThreads(channelId, params = {}) {
+  // https://discord.com/developers/docs/resources/channel#list-public-archived-threads
+  return discordApiRequest(`/channels/${channelId}/threads/archived/public`, params);
+}
+
 async function fetchChannelMessagesInRange(channelId, startUtc, endUtc) {
   const collected = [];
   let before = undefined; // message id to paginate backwards
@@ -279,6 +289,81 @@ async function fetchChannelMessagesInRange(channelId, startUtc, endUtc) {
     if (page.length < 100) break; // No more pages
   }
   return collected;
+}
+
+async function fetchForumChannelMessagesInRange(forumChannelId, startUtc, endUtc) {
+  // Collect thread IDs under the forum channel within/around the window, then fetch their messages
+  const threads = new Map();
+  try {
+    const ch = await discordGetChannel(forumChannelId).catch(() => null);
+    const guildId = ch && ch.guild_id ? ch.guild_id : null;
+    // 1) Active threads at guild level, filter by parent
+    if (guildId) {
+      try {
+        const active = await discordGetGuildActiveThreads(guildId);
+        const actThreads = Array.isArray(active?.threads) ? active.threads : [];
+        for (const t of actThreads) {
+          if (t?.parent_id === forumChannelId) {
+            threads.set(t.id, t);
+          }
+        }
+      } catch (e) {
+        logDebug(`Failed to list active threads for guild ${guildId}: ${e?.message || e}`);
+      }
+    }
+    // 2) Archived public threads for the forum channel, paginate by 'before' timestamp
+    let before = undefined; // ISO8601 timestamp string
+    for (let i = 0; i < 10; i++) { // hard stop to avoid infinite loops
+      const params = { limit: 100 };
+      if (before) params.before = before;
+      let resp = null;
+      try {
+        resp = await discordGetForumArchivedPublicThreads(forumChannelId, params);
+      } catch (e) {
+        logDebug(`Failed to list archived threads for forum ${forumChannelId}: ${e?.message || e}`);
+        break;
+      }
+      const arr = Array.isArray(resp?.threads) ? resp.threads : [];
+      if (arr.length === 0) break;
+      for (const t of arr) {
+        // Only keep threads whose archive_timestamp or last_message_id time intersects the window roughly
+        // Use 'archive_timestamp' as a proxy for recency
+        const archiveTs = t?.thread_metadata?.archive_timestamp || t?.archive_timestamp;
+        if (archiveTs) {
+          const at = new Date(archiveTs);
+          if (at >= startUtc || at >= new Date(startUtc.getTime() - 7 * 24 * 60 * 60 * 1000)) { // include near range
+            threads.set(t.id, t);
+          }
+        } else {
+          threads.set(t.id, t);
+        }
+      }
+      const last = arr[arr.length - 1];
+      const lastTs = last?.thread_metadata?.archive_timestamp || last?.archive_timestamp;
+      if (lastTs) {
+        before = lastTs;
+        if (new Date(lastTs) < startUtc) break; // older than start
+      } else {
+        break;
+      }
+      if (!resp?.has_more) break;
+    }
+  } catch (e) {
+    logDebug(`Forum thread discovery failed: ${e?.message || e}`);
+  }
+
+  const threadIds = Array.from(threads.keys());
+  logInfo(`Forum ${forumChannelId}: discovered ${threadIds.length} threads (active/archived)`);
+  const allMessages = [];
+  for (const tid of threadIds) {
+    try {
+      const msgs = await fetchChannelMessagesInRange(tid, startUtc, endUtc);
+      if (msgs?.length) allMessages.push(...msgs);
+    } catch (e) {
+      logDebug(`Failed to fetch messages for thread ${tid}: ${e?.message || e}`);
+    }
+  }
+  return allMessages;
 }
 
 function filterAndExtractFromMessages(messages) {
@@ -375,27 +460,47 @@ function buildMonologueScriptHeuristic(perChannelMaterials, { startUtc, endUtc }
   const startJstLabel = formatJst(startUtc);
   const endJstLabel = formatJst(endUtc);
   const bullets = [];
+  const textSnippets = [];
   for (const [, material] of perChannelMaterials) {
+    // 記事（URL付き）
     for (const art of material.articles) {
       const title = art.title || '無題の記事';
       const summary = art.text ? art.text.slice(0, 240).replace(/\s+/g, ' ') : '';
       bullets.push({ title, url: art.url, summary });
     }
+    // Discordのテキストのみの会話
+    if (Array.isArray(material.texts)) {
+      for (const msg of material.texts) {
+        const snippet = (msg || '').replace(/\s+/g, ' ').trim();
+        if (snippet) textSnippets.push(snippet.slice(0, 200));
+      }
+    }
   }
+  // テキスト抜粋は多すぎないよう上限
+  const limitedTextSnippets = textSnippets.slice(0, 20);
 
   const lines = [];
   lines.push(`こんにちは。本放送では、${startJstLabel} から ${endJstLabel} の間に共有された話題をまとめてご紹介します。`);
-  if (bullets.length === 0) {
+  if (bullets.length === 0 && limitedTextSnippets.length === 0) {
     lines.push('本日は特筆すべき新着トピックはありませんでした。最近の動向の振り返りや、今後の見どころを簡単にお話しします。');
   } else {
-    lines.push('まずは注目のトピックから。');
+    lines.push('まずはDiscordでの会話から、要点を拾っていきます。');
   }
-  let idx = 1;
-  for (const b of bullets) {
-    lines.push(`${idx}. ${b.title}`);
-    if (b.summary) lines.push(`概要: ${b.summary}`);
-    lines.push(`出典: ${b.url}`);
-    idx += 1;
+  // 先に会話の抜粋
+  if (limitedTextSnippets.length > 0) {
+    for (const s of limitedTextSnippets) {
+      lines.push(`・${s}`);
+    }
+  }
+  // 続いて参考トピック（記事要約）
+  if (bullets.length > 0) {
+    lines.push('参考トピックの要点も簡単に。');
+    let idx = 1;
+    for (const b of bullets) {
+      lines.push(`${idx}. ${b.title}`);
+      if (b.summary) lines.push(`概要: ${b.summary}`);
+      idx += 1;
+    }
   }
   lines.push('以上、注目の話題をダイジェストでお届けしました。');
   lines.push('この放送が情報収集の助けになれば幸いです。それでは、良い一日をお過ごしください。');
@@ -409,14 +514,30 @@ async function buildMonologueScriptAI(perChannelMaterials, { startUtc, endUtc })
   const startJstLabel = formatJst(startUtc);
   const endJstLabel = formatJst(endUtc);
   const topics = [];
+  const chatSnippets = [];
   for (const [, material] of perChannelMaterials) {
+    // URL付きの記事
     for (const art of material.articles) {
       topics.push({ title: art.title || '無題の記事', url: art.url, summary: art.text ? art.text.slice(0, 800) : '' });
     }
+    // Discordのテキスト（URLなし）
+    if (Array.isArray(material.texts)) {
+      for (const msg of material.texts) {
+        const s = (msg || '').replace(/\s+/g, ' ').trim();
+        if (s) chatSnippets.push(s.slice(0, 300));
+      }
+    }
   }
+  const limitedChatSnippets = chatSnippets.slice(0, 30);
 
-  const system = 'あなたは日本語のナレーターです。ポッドキャスト用の落ち着いた独白台本を作成します。専門用語は平易に説明し、冗長さは避け、5〜9分程度の長さを目安にしてください。';
-  const user = `期間: ${startJstLabel} 〜 ${endJstLabel}\n\n話題一覧（title/url/summaryの順）:\n${topics.map(t => `- ${t.title}\n  ${t.url}\n  ${t.summary}`).join('\n')}\n\n要件:\n- 導入→各トピックの要点→締めの順に\n- 適宜「出典: URL」で参照提示\n- 台本のみを出力（ヘッダ不要）`;
+  const system = 'あなたは日本語のナレーターです。Discordの会話ログを中心に、ポッドキャスト用の落ち着いた独白台本を作成します。専門用語は平易に説明し、冗長さは避け、5〜9分程度の長さを目安にしてください。';
+  const chatsBlock = limitedChatSnippets.length > 0
+    ? `Discordの会話抜粋:\n${limitedChatSnippets.map(s => `- ${s}`).join('\n')}`
+    : 'Discordの会話抜粋: なし';
+  const topicsBlock = topics.length > 0
+    ? `参考資料（記事の要旨）:\n${topics.map(t => `- ${t.title}\n  要旨: ${t.summary}`).join('\n')}`
+    : '参考資料: なし';
+  const user = `期間: ${startJstLabel} 〜 ${endJstLabel}\n\n${chatsBlock}\n\n${topicsBlock}\n\n要件:\n- 主素材はDiscordの会話ログ。記事要約は補強として活用\n- 導入→要点整理（会話の流れを重視）→締めの順に\n- URLや出典の読み上げは不要（言及しない）\n- 台本のみを出力（ヘッダ不要）`;
 
   try {
     const resp = await openai.chat.completions.create({
@@ -443,15 +564,22 @@ async function generatePostTitleAI(perChannelMaterials, { startUtc, endUtc }) {
   const defaultTitle = `日次ダイジェスト ${formatJst(startUtc).slice(0, 10)}`;
   try {
     const topics = [];
+    const chatPhrases = [];
     for (const [, material] of perChannelMaterials) {
       for (const art of material.articles) {
         topics.push(art.title || '無題');
       }
+      if (Array.isArray(material.texts)) {
+        for (const t of material.texts) {
+          const s = (t || '').replace(/\s+/g, ' ').trim();
+          if (s) chatPhrases.push(s.slice(0, 40));
+        }
+      }
     }
-    if (!openai || topics.length === 0) return topics[0] || defaultTitle;
-    const prompt = `以下のトピック群から日本語の短い番組タイトルを1つ作ってください。最大28文字。装飾や引用符は不要で、具体的で簡潔に。
-トピック: ${topics.slice(0, 8).join(' / ')}
-期間: ${formatJst(startUtc)} 〜 ${formatJst(endUtc)}`;
+    if (!openai) return topics[0] || chatPhrases[0] || defaultTitle;
+    const tBlock = topics.length ? `記事トピック: ${topics.slice(0, 6).join(' / ')}` : '';
+    const cBlock = chatPhrases.length ? `会話キーワード: ${chatPhrases.slice(0, 10).join(' / ')}` : '';
+    const prompt = `以下の情報から、日本語の短い番組タイトルを1つ作ってください。最大28文字。装飾や引用符は不要で、具体的で簡潔に。\n${tBlock}${tBlock && cBlock ? '\n' : ''}${cBlock}\n期間: ${formatJst(startUtc)} 〜 ${formatJst(endUtc)}`;
     const resp = await openai.chat.completions.create({
       model: openaiModel,
       messages: [
@@ -462,7 +590,7 @@ async function generatePostTitleAI(perChannelMaterials, { startUtc, endUtc }) {
       max_tokens: 64,
     });
     const title = resp.choices?.[0]?.message?.content?.trim();
-    return title || topics[0] || defaultTitle;
+    return title || topics[0] || chatPhrases[0] || defaultTitle;
   } catch {
     return defaultTitle;
   }
@@ -494,25 +622,37 @@ async function main() {
   const perChannelMaterials = new Map();
   for (const channelId of discordChannelIds) {
     logInfo(`Fetching Discord messages for channel ${channelId}...`);
-    const messages = await fetchChannelMessagesInRange(channelId, startUtc, endUtc);
+    let messages = [];
+    try {
+      const ch = await discordGetChannel(channelId).catch(() => null);
+      if (ch && ch.type === 15) {
+        // Forum channel: aggregate messages from threads
+        messages = await fetchForumChannelMessagesInRange(channelId, startUtc, endUtc);
+      } else {
+        messages = await fetchChannelMessagesInRange(channelId, startUtc, endUtc);
+      }
+    } catch (e) {
+      logWarn(`Failed to fetch messages for channel ${channelId}: ${e?.message || e}`);
+      messages = [];
+    }
     logInfo(`Fetched ${messages.length} messages in range for channel ${channelId}`);
 
     const extracted = filterAndExtractFromMessages(messages);
     const allUrls = Array.from(new Set(extracted.flatMap(m => m.urls)));
     const limitedUrls = allUrls.slice(0, maxArticleCount);
-
-    const nonUrlMessages = extracted
-      .map(m => m.content)
-      .filter(Boolean);
+    // すべてのテキスト（URL有無問わず）
+    const textMessages = extracted.map(m => m.content).filter(Boolean);
+    // ログ用にURL無しのテキスト件数も併記
+    const nonUrlMessages = extracted.filter(m => (!m.urls || m.urls.length === 0)).map(m => m.content).filter(Boolean);
 
     // Logging: URL/テキストの内訳を残す
     const urlMsgCount = extracted.filter(m => (m.urls && m.urls.length > 0)).length;
     const textOnlyCount = extracted.filter(m => (!m.urls || m.urls.length === 0) && m.content).length;
-    logInfo(`Channel ${channelId}: ${urlMsgCount} messages contained URLs, ${textOnlyCount} text-only messages`);
+    logInfo(`Channel ${channelId}: ${urlMsgCount} messages contained URLs, ${textOnlyCount} text-only messages, ${textMessages.length} total text messages`);
     if (logLevel === 'debug') {
       const showUrls = allUrls.slice(0, 10);
       if (showUrls.length) logDebug(`Channel ${channelId}: sample URLs ->`, showUrls);
-      const textSnippets = nonUrlMessages
+      const textSnippets = textMessages
         .map(t => (t || '').replace(/\s+/g, ' ').trim().slice(0, 120))
         .filter(Boolean)
         .slice(0, 5);
@@ -527,7 +667,7 @@ async function main() {
     perChannelMaterials.set(channelId, {
       uniqueUrls: limitedUrls,
       articles,
-      miscMessages: nonUrlMessages,
+      texts: textMessages,
     });
   }
 
@@ -874,4 +1014,3 @@ async function postLatestAudioFromOut(startUtc, endUtc) {
     logWarn(`post-only failed: ${e?.message || e}`);
   }
 }
-
