@@ -162,6 +162,40 @@ function normalizeUrl(rawUrl) {
   }
 }
 
+function isXStatusUrl(rawUrl) {
+  try {
+    const u = new URL(rawUrl);
+    const host = u.hostname.toLowerCase();
+    return (host.endsWith('x.com') || host.endsWith('twitter.com')) && /\/status\//.test(u.pathname);
+  } catch {
+    return false;
+  }
+}
+
+async function fetchXoEmbed(rawUrl) {
+  const api = `https://publish.twitter.com/oembed?omit_script=1&hide_thread=1&hide_media=0&dnt=1&url=${encodeURIComponent(rawUrl)}`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 12000);
+  try {
+    const res = await fetch(api, { signal: controller.signal });
+    if (!res.ok) throw new Error(`oEmbed ${res.status}`);
+    const data = await res.json();
+    const html = data?.html || '';
+    // Convert embed HTML to text
+    const dom = new JSDOM(`<div>${html}</div>`);
+    const textContent = dom.window.document.body.textContent || '';
+    const clean = textContent.replace(/\s+/g, ' ').trim();
+    const author = data?.author_name ? `（by ${data.author_name}）` : '';
+    const title = clean.slice(0, 40) + author;
+    return { title, text: clean };
+  } catch (e) {
+    logDebug(`X oEmbed failed for ${rawUrl}: ${e?.message || e}`);
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function discordApiRequest(pathname, queryParams = {}) {
   const baseUrl = 'https://discord.com/api/v10';
   const url = new URL(baseUrl + pathname);
@@ -295,6 +329,14 @@ async function fetchArticleContent(url) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 15000);
   try {
+    // X/Twitter: try oEmbed without fetching the page
+    if (isXStatusUrl(url)) {
+      const xo = await fetchXoEmbed(url);
+      if (xo) {
+        return { url, title: xo.title || 'Xの投稿', text: xo.text || null };
+      }
+    }
+
     const res = await fetch(url, { signal: controller.signal, redirect: 'follow' });
     const contentType = res.headers.get('content-type') || '';
     if (!contentType.includes('text/html')) {
