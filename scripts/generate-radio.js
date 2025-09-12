@@ -693,6 +693,20 @@ async function main() {
       if (textSnippets.length) logDebug(`Channel ${channelId}: sample text-only snippets ->`, textSnippets);
     }
 
+    // Detect likely missing Message Content Intent / permissions
+    try {
+      const hasAnyContent = extracted.some(m => (m.content && m.content.trim().length > 0));
+      const hasAnyUrls = extracted.some(m => (m.urls && m.urls.length > 0));
+      if (messages.length > 0 && !hasAnyContent && !hasAnyUrls) {
+        logWarn(
+          `Channel ${channelId}: Messages were fetched but contain no text. ` +
+          `This is commonly caused by the bot lacking the "Message Content Intent" or missing "Read Message History" permission. ` +
+          `Please enable Message Content Intent in the Discord Developer Portal (Bot > Privileged Gateway Intents), ` +
+          `re-invite/update the bot permissions in your server, and ensure it has View Channel + Read Message History.`
+        );
+      }
+    } catch {}
+
     // Full dump of discord content to logs when enabled
     if (logDiscordDump) {
       try {
