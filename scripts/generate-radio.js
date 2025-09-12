@@ -375,10 +375,6 @@ async function fetchForumChannelMessagesInRange(forumChannelId, startUtc, endUtc
 function filterAndExtractFromMessages(messages) {
   const results = [];
   for (const msg of messages) {
-    // Ignore system messages and bots if possible
-    if (msg.type && msg.type !== 0) continue; // 0: default message
-    if (msg.author && msg.author.bot) continue;
-
     const textParts = [];
     if (msg.content) {
       textParts.push(msg.content);
