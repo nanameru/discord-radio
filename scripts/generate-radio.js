@@ -81,6 +81,7 @@ function parseCliArgs() {
   }
   return {
     date: argMap.get('date') || null,
+    windowDays: argMap.get('window-days') ? parseInt(argMap.get('window-days'), 10) : null,
     noPost: argMap.has('no-post'),
     postOnly: argMap.has('post-only'),
   };
@@ -95,6 +96,10 @@ function buildJstEndUtcFromDateString(dateStr /* YYYY-MM-DD */) {
   // 04:00 JST => 19:00 UTC (previous day)
   const endUtc = new Date(Date.UTC(year, month - 1, day, 4 - 9, 0, 0, 0));
   return endUtc;
+}
+
+function addDays(dateUtc, days) {
+  return new Date(dateUtc.getTime() + days * 24 * 60 * 60 * 1000);
 }
 
 function getDefaultJstEndUtcNow() {
@@ -616,11 +621,12 @@ async function generatePostTitleAI(perChannelMaterials, { startUtc, endUtc }) {
 
 async function main() {
   assertRequiredEnv();
-  const { date, noPost, postOnly } = parseCliArgs();
+  const { date, windowDays, noPost, postOnly } = parseCliArgs();
   const endUtc = date ? buildJstEndUtcFromDateString(date) : getDefaultJstEndUtcNow();
-  const startUtc = new Date(endUtc.getTime() - 24 * 60 * 60 * 1000);
+  const winDays = Number.isFinite(windowDays) && windowDays && windowDays > 0 ? windowDays : parseInt(process.env.WINDOW_DAYS || '1', 10);
+  const startUtc = new Date(endUtc.getTime() - winDays * 24 * 60 * 60 * 1000);
 
-  logInfo(`Time window (JST): ${formatJst(startUtc)} -> ${formatJst(endUtc)}`);
+  logInfo(`Time window (JST): ${formatJst(startUtc)} -> ${formatJst(endUtc)} (days=${winDays})`);
 
   // Allow multiple delimiters: comma, semicolon, Japanese punctuation, whitespace
   const discordChannelIds = discordChannelIdsEnv
